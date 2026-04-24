@@ -1,0 +1,11 @@
+ticker,name,target_weight,position_ils,buy_price,sector
+NVDA,NVIDIA,0.15,30000,,AI / Semiconductors
+PLTR,Palantir,0.10,20000,,AI / Software
+AMD,AMD,0.10,20000,,Semiconductors
+TSLA,Tesla,0.10,20000,,EV / Growth
+META,Meta Platforms,0.10,20000,,Big Tech / AI
+AMZN,Amazon,0.10,20000,,Cloud / Commerce
+CRWD,CrowdStrike,0.05,10000,,Cybersecurity
+QQQ,Invesco QQQ ETF,0.10,20000,,ETF Tech
+VOO,Vanguard S&P 500 ETF,0.10,20000,,ETF Broad Market
+CASH,Cash,0.10,20000,,Cash
