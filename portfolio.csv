@@ -1,10 +1,10 @@
 ticker,shares,avg_cost,target_pct,sector
-NVDA,10,0,15,AI / Semiconductors
-PLTR,40,0,10,AI / Software
-AMD,20,0,10,Semiconductors
-TSLA,10,0,10,EV / Growth
-META,5,0,10,Big Tech
-AMZN,5,0,10,Big Tech
-CRWD,5,0,5,Cybersecurity
-QQQ,10,0,10,ETF
-VOO,10,0,10,ETF
+NVDA,0,0,15,AI / Semiconductors
+PLTR,0,0,10,AI / Software
+AMD,0,0,10,Semiconductors
+TSLA,0,0,10,EV / Growth
+META,0,0,10,Big Tech
+AMZN,0,0,10,Big Tech
+CRWD,0,0,5,Cybersecurity
+QQQ,0,0,10,ETF
+VOO,0,0,10,ETF
