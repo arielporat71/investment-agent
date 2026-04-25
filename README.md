@@ -1,17 +1,23 @@
-# Investment Agent v3 - Stooq fallback
+# Investment Agent v4.3 Daily Auto Scan
 
-גרסה זו מפחיתה משמעותית את בעיית `YFRateLimitError` של Yahoo Finance.
+## Main behavior
+- The recommended ticker list scans automatically once per calendar day when the app is opened.
+- You can force a scan from the sidebar.
+- The actual portfolio is manual only.
+- Portfolio view shows:
+  - current value
+  - gain/loss per stock
+  - gain/loss %
+  - actual weight %
+  - target weight %
+  - rebalance amount
+  - RSI, momentum, volume ratio and signal reason
 
-מה חדש:
-- שימוש ב-Stooq כעדיפות ראשונה לנתוני סוף-יום.
-- Yahoo Finance רק כגיבוי.
-- Cache מקומי בתיקיית `.cache`.
+## Streamlit Cloud
+Upload/replace in the root of the GitHub repo:
+- app.py
+- requirements.txt
+- runtime.txt
+- portfolio.csv
 
-הרצה:
-```bash
-py -3.12 -m streamlit run app.py
-```
-
-אם הדשבורד כבר פתוח, עצור עם `Ctrl + C`, חלץ את התיקייה החדשה והריץ שוב.
-
-הערה: הנתונים עשויים להיות delayed/end-of-day, וזה מתאים לסוכן המלצות יומי/חצי-יומי.
+Then reboot the app.
