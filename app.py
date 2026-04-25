@@ -1,75 +1,292 @@
+import os
+from datetime import datetime
+
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import yfinance as yf
 
-from agent import analyze_portfolio, format_alerts, send_telegram, fetch_history
+st.set_page_config(page_title="Investment Agent", page_icon="📈", layout="wide")
 
-st.set_page_config(page_title="Aggressive Portfolio Agent", layout="wide")
-st.title("🚀 Aggressive Portfolio Agent — Recommendation Only")
-st.caption("סוכן המלצות לתיק השקעות — ללא ביצוע קניות/מכירות בפועל")
+PORTFOLIO_FILE = "portfolio.csv"
+DEFAULT_CASH = 200000.0
 
-portfolio_path = st.sidebar.text_input("Portfolio CSV", "portfolio.csv")
-refresh = st.sidebar.button("🔄 Refresh signals")
-send_alerts = st.sidebar.button("📲 Send Telegram alerts")
+DEFAULT_RECOMMENDED_UNIVERSE = [
+    "NVDA", "PLTR", "AMD", "TSLA", "META", "AMZN", "CRWD", "AVGO", "ARM",
+    "MSFT", "GOOGL", "AAPL", "NFLX", "ORCL", "SMCI", "ANET", "PANW", "QQQ", "VOO"
+]
 
-@st.cache_data(ttl=900)
-def get_data(path):
-    return analyze_portfolio(path)
+SECTOR_MAP = {
+    "NVDA": "AI / Semiconductors", "AMD": "Semiconductors", "AVGO": "Semiconductors", "ARM": "Semiconductors",
+    "SMCI": "AI Infrastructure", "PLTR": "AI / Software", "MSFT": "Big Tech", "GOOGL": "Big Tech",
+    "META": "Big Tech", "AMZN": "Big Tech", "AAPL": "Big Tech", "NFLX": "Media / Growth",
+    "TSLA": "EV / Growth", "CRWD": "Cybersecurity", "PANW": "Cybersecurity", "ANET": "Networking",
+    "ORCL": "Cloud / Software", "QQQ": "ETF", "VOO": "ETF", "SPY": "ETF"
+}
 
-df = get_data(portfolio_path)
 
-if refresh:
-    st.cache_data.clear()
-    df = get_data(portfolio_path)
+def normalize_ticker(t: str) -> str:
+    return str(t).strip().upper()
 
-portfolio_value = df["position_ils"].sum()
-active_value = df[df["ticker"] != "CASH"]["position_ils"].sum()
-cash_value = df[df["ticker"] == "CASH"]["position_ils"].sum()
-buy_count = (df["signal"] == "BUY").sum()
-sell_count = df["signal"].astype(str).str.contains("SELL", na=False).sum()
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Portfolio", f"₪{portfolio_value:,.0f}")
-c2.metric("Invested", f"₪{active_value:,.0f}")
-c3.metric("Cash", f"₪{cash_value:,.0f}")
-c4.metric("BUY / SELL", f"{buy_count} / {sell_count}")
+def load_portfolio() -> pd.DataFrame:
+    if os.path.exists(PORTFOLIO_FILE):
+        df = pd.read_csv(PORTFOLIO_FILE)
+    else:
+        df = pd.DataFrame(columns=["ticker", "shares", "avg_cost", "target_pct", "sector"])
+    for col in ["ticker", "shares", "avg_cost", "target_pct", "sector"]:
+        if col not in df.columns:
+            df[col] = "" if col in ["ticker", "sector"] else 0.0
+    df["ticker"] = df["ticker"].apply(normalize_ticker)
+    df["shares"] = pd.to_numeric(df["shares"], errors="coerce").fillna(0.0)
+    df["avg_cost"] = pd.to_numeric(df["avg_cost"], errors="coerce").fillna(0.0)
+    df["target_pct"] = pd.to_numeric(df["target_pct"], errors="coerce").fillna(0.0)
+    df["sector"] = df.apply(lambda r: r["sector"] if str(r["sector"]).strip() else SECTOR_MAP.get(r["ticker"], "Other"), axis=1)
+    df = df[df["ticker"] != ""].drop_duplicates(subset=["ticker"], keep="last")
+    return df
 
-st.subheader("📊 Signals")
-st.dataframe(
-    df[["ticker", "name", "signal", "score", "price", "rsi", "ma20", "ma50", "volume_ratio", "pnl_pct", "position_ils", "target_weight", "reason"]],
+
+def save_portfolio(df: pd.DataFrame):
+    df = df.copy()
+    df["ticker"] = df["ticker"].apply(normalize_ticker)
+    df = df[df["ticker"] != ""]
+    df.to_csv(PORTFOLIO_FILE, index=False)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_history(ticker: str, period: str = "6mo") -> pd.DataFrame:
+    try:
+        data = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True, threads=False)
+        if data is None or data.empty:
+            return pd.DataFrame()
+        data = data.reset_index()
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = [c[0] if isinstance(c, tuple) else c for c in data.columns]
+        return data
+    except Exception:
+        return pd.DataFrame()
+
+
+def calc_rsi(close: pd.Series, period: int = 14) -> float:
+    if len(close) < period + 2:
+        return np.nan
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return float(rsi.iloc[-1]) if not rsi.empty else np.nan
+
+
+def analyze_ticker(ticker: str) -> dict:
+    hist = fetch_history(ticker)
+    if hist.empty or "Close" not in hist.columns:
+        return {
+            "ticker": ticker, "price": np.nan, "signal": "NO DATA", "score": 0,
+            "reason": "No market data", "rsi": np.nan, "change_1m_pct": np.nan,
+            "ma20": np.nan, "ma50": np.nan
+        }
+    close = pd.to_numeric(hist["Close"], errors="coerce").dropna()
+    volume = pd.to_numeric(hist.get("Volume", pd.Series(dtype=float)), errors="coerce").dropna()
+    if len(close) < 55:
+        return {"ticker": ticker, "price": close.iloc[-1], "signal": "WATCH", "score": 40,
+                "reason": "Limited history", "rsi": np.nan, "change_1m_pct": np.nan,
+                "ma20": np.nan, "ma50": np.nan}
+
+    price = float(close.iloc[-1])
+    ma20 = float(close.rolling(20).mean().iloc[-1])
+    ma50 = float(close.rolling(50).mean().iloc[-1])
+    rsi = calc_rsi(close)
+    change_1m_pct = float((price / close.iloc[-22] - 1) * 100) if len(close) > 22 else np.nan
+    vol_ratio = float(volume.iloc[-1] / volume.rolling(20).mean().iloc[-1]) if len(volume) > 20 and volume.rolling(20).mean().iloc[-1] else 1
+
+    score = 0
+    reasons = []
+    if price > ma20:
+        score += 20; reasons.append("above MA20")
+    if price > ma50:
+        score += 25; reasons.append("above MA50")
+    if ma20 > ma50:
+        score += 20; reasons.append("MA20 > MA50")
+    if 45 <= rsi <= 70:
+        score += 15; reasons.append("healthy RSI")
+    elif rsi < 35:
+        score += 8; reasons.append("oversold")
+    elif rsi > 75:
+        score -= 15; reasons.append("overbought")
+    if change_1m_pct > 0:
+        score += 10; reasons.append("positive 1M momentum")
+    if vol_ratio > 1.2:
+        score += 10; reasons.append("volume spike")
+
+    score = int(max(0, min(100, score)))
+    if score >= 75:
+        signal = "BUY / ADD"
+    elif score >= 55:
+        signal = "WATCH"
+    elif score >= 35:
+        signal = "HOLD"
+    else:
+        signal = "REDUCE / AVOID"
+
+    return {
+        "ticker": ticker, "price": price, "signal": signal, "score": score,
+        "reason": ", ".join(reasons) if reasons else "Weak setup",
+        "rsi": rsi, "change_1m_pct": change_1m_pct, "ma20": ma20, "ma50": ma50
+    }
+
+
+def analyze_many(tickers):
+    rows = [analyze_ticker(t) for t in tickers]
+    return pd.DataFrame(rows)
+
+
+def currency_fmt(v):
+    if pd.isna(v):
+        return "—"
+    return f"${v:,.2f}"
+
+
+def pct_fmt(v):
+    if pd.isna(v):
+        return "—"
+    return f"{v:.2f}%"
+
+
+st.title("📈 Investment Agent — Dynamic Portfolio")
+st.caption("Recommendation-only tool. Not financial advice. Review before buying/selling.")
+
+portfolio = load_portfolio()
+
+with st.sidebar:
+    st.header("⚙️ Settings")
+    cash = st.number_input("Cash / uninvested amount", min_value=0.0, value=DEFAULT_CASH, step=1000.0)
+    st.markdown("---")
+    st.subheader("Dynamic recommended universe")
+    universe_input = st.text_area(
+        "Tickers to scan",
+        value=", ".join(DEFAULT_RECOMMENDED_UNIVERSE),
+        help="Add/remove tickers here. The app will rank them dynamically."
+    )
+    universe = [normalize_ticker(t) for t in universe_input.replace("\n", ",").split(",") if normalize_ticker(t)]
+    max_recos = st.slider("How many recommendations to show", 5, 20, 10)
+
+    st.markdown("---")
+    uploaded = st.file_uploader("Upload actual portfolio CSV", type=["csv"])
+    if uploaded is not None:
+        try:
+            portfolio = pd.read_csv(uploaded)
+            save_portfolio(portfolio)
+            st.success("Portfolio uploaded and saved.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not read CSV: {e}")
+
+st.subheader("1) Actual portfolio editor")
+st.write("Edit shares, average cost, target %, or remove a stock. Click **Save portfolio** after changes.")
+
+edit_df = portfolio.copy()
+if edit_df.empty:
+    edit_df = pd.DataFrame([{"ticker": "NVDA", "shares": 0, "avg_cost": 0, "target_pct": 10, "sector": "AI / Semiconductors"}])
+
+edited = st.data_editor(
+    edit_df,
+    num_rows="dynamic",
     use_container_width=True,
-    hide_index=True,
+    column_config={
+        "ticker": st.column_config.TextColumn("Ticker", required=True),
+        "shares": st.column_config.NumberColumn("Shares", min_value=0.0, step=1.0),
+        "avg_cost": st.column_config.NumberColumn("Avg cost", min_value=0.0, step=1.0),
+        "target_pct": st.column_config.NumberColumn("Target %", min_value=0.0, max_value=100.0, step=1.0),
+        "sector": st.column_config.TextColumn("Sector")
+    }
 )
 
-left, right = st.columns(2)
-with left:
-    st.subheader("Exposure by sector")
-    sector_df = df.groupby("sector", as_index=False)["position_ils"].sum()
-    fig = px.pie(sector_df, names="sector", values="position_ils")
-    st.plotly_chart(fig, use_container_width=True)
+col_save, col_download = st.columns([1, 1])
+with col_save:
+    if st.button("💾 Save portfolio", type="primary"):
+        save_portfolio(edited)
+        st.success("Saved. Removed rows will stay removed.")
+        st.rerun()
+with col_download:
+    st.download_button("⬇️ Download portfolio CSV", data=edited.to_csv(index=False), file_name="portfolio.csv", mime="text/csv")
 
-with right:
-    st.subheader("Signals count")
-    sig_df = df.groupby("signal", as_index=False).size()
-    fig = px.bar(sig_df, x="signal", y="size")
-    st.plotly_chart(fig, use_container_width=True)
+portfolio = edited.copy()
+portfolio["ticker"] = portfolio["ticker"].apply(normalize_ticker)
+portfolio = portfolio[portfolio["ticker"] != ""]
+portfolio["sector"] = portfolio.apply(lambda r: r["sector"] if str(r["sector"]).strip() else SECTOR_MAP.get(r["ticker"], "Other"), axis=1)
 
-st.subheader("📈 Price chart")
-tickers = [t for t in df["ticker"].tolist() if t != "CASH"]
-selected = st.selectbox("Ticker", tickers)
-period = st.selectbox("Period", ["3mo", "6mo", "1y", "2y"], index=1)
-hist = fetch_history(selected, period=period)
-if not hist.empty:
-    chart_df = hist.reset_index()
-    fig = px.line(chart_df, x="Date", y="Close", title=f"{selected} Close Price")
-    st.plotly_chart(fig, use_container_width=True)
+st.subheader("2) Portfolio value, allocation and gain/loss")
+if not portfolio.empty:
+    analysis_port = analyze_many(portfolio["ticker"].tolist())
+    port = portfolio.merge(analysis_port, on="ticker", how="left")
+    port["market_value"] = port["shares"] * port["price"].fillna(0)
+    invested_value = float(port["market_value"].sum())
+    total_value = invested_value + cash
+    port["actual_pct"] = np.where(total_value > 0, port["market_value"] / total_value * 100, 0)
+    port["cost_basis"] = port["shares"] * port["avg_cost"]
+    port["gain_loss"] = port["market_value"] - port["cost_basis"]
+    port["gain_loss_pct"] = np.where(port["cost_basis"] > 0, port["gain_loss"] / port["cost_basis"] * 100, np.nan)
+    port["target_value"] = total_value * port["target_pct"] / 100
+    port["rebalance_amount"] = port["target_value"] - port["market_value"]
 
-if send_alerts:
-    alerts = format_alerts(df)
-    if alerts:
-        ok = send_telegram("\n\n".join(alerts))
-        st.success("Alerts sent to Telegram" if ok else "Telegram not configured or failed")
-    else:
-        st.info("No active alerts right now")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total value", f"${total_value:,.0f}")
+    c2.metric("Invested", f"${invested_value:,.0f}")
+    c3.metric("Cash", f"${cash:,.0f}")
+    c4.metric("Total gain/loss", f"${port['gain_loss'].sum():,.0f}")
 
-st.warning("אין לראות בכך ייעוץ השקעות. זה כלי עזר לקבלת החלטות בלבד.")
+    show_cols = ["ticker", "shares", "price", "market_value", "actual_pct", "target_pct", "gain_loss", "gain_loss_pct", "signal", "score", "rebalance_amount", "reason"]
+    st.dataframe(
+        port[show_cols].sort_values("market_value", ascending=False),
+        use_container_width=True,
+        column_config={
+            "price": st.column_config.NumberColumn("Price", format="$%.2f"),
+            "market_value": st.column_config.NumberColumn("Value", format="$%.0f"),
+            "actual_pct": st.column_config.NumberColumn("Actual %", format="%.2f%%"),
+            "target_pct": st.column_config.NumberColumn("Target %", format="%.2f%%"),
+            "gain_loss": st.column_config.NumberColumn("Gain/Loss", format="$%.0f"),
+            "gain_loss_pct": st.column_config.NumberColumn("Gain/Loss %", format="%.2f%%"),
+            "rebalance_amount": st.column_config.NumberColumn("Buy/Sell to target", format="$%.0f"),
+        }
+    )
+
+    c5, c6 = st.columns(2)
+    with c5:
+        fig = px.pie(port, names="ticker", values="market_value", title="Actual allocation by ticker")
+        st.plotly_chart(fig, use_container_width=True)
+    with c6:
+        sector = port.groupby("sector", as_index=False)["market_value"].sum()
+        fig2 = px.bar(sector, x="sector", y="market_value", title="Exposure by sector")
+        st.plotly_chart(fig2, use_container_width=True)
+else:
+    st.info("No portfolio rows yet. Add stocks above and click Save portfolio.")
+
+st.subheader("3) Dynamic recommended list")
+scan = analyze_many(universe)
+scan = scan.sort_values(["score", "change_1m_pct"], ascending=[False, False]).head(max_recos)
+st.dataframe(
+    scan[["ticker", "price", "signal", "score", "rsi", "change_1m_pct", "reason"]],
+    use_container_width=True,
+    column_config={
+        "price": st.column_config.NumberColumn("Price", format="$%.2f"),
+        "rsi": st.column_config.NumberColumn("RSI", format="%.1f"),
+        "change_1m_pct": st.column_config.NumberColumn("1M change", format="%.2f%%"),
+    }
+)
+
+st.subheader("4) Suggested actions vs your actual portfolio")
+if not portfolio.empty:
+    owned = set(portfolio["ticker"].tolist())
+    scan["owned"] = scan["ticker"].isin(owned)
+    scan["suggested_action"] = np.where(
+        (scan["signal"] == "BUY / ADD") & (~scan["owned"]), "Consider adding to watch/portfolio",
+        np.where((scan["signal"] == "BUY / ADD") & (scan["owned"]), "Consider adding if below target",
+        np.where(scan["signal"] == "REDUCE / AVOID", "Avoid / reduce", "Watch"))
+    )
+    st.dataframe(scan[["ticker", "owned", "signal", "score", "suggested_action", "reason"]], use_container_width=True)
+else:
+    st.info("Add your actual portfolio first to compare recommendations.")
+
+st.caption(f"Last refresh: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Data source: yfinance")
