@@ -1,11 +1,8 @@
-ticker,name,shares,avg_buy_price,target_weight,sector,active
-NVDA,NVIDIA,0,0,0.15,AI / Semiconductors,True
-AMD,AMD,0,0,0.10,AI / Semiconductors,True
-PLTR,Palantir,0,0,0.10,AI / Software,True
-TSLA,Tesla,0,0,0.10,EV / Growth,True
-META,Meta Platforms,0,0,0.10,Mega Cap Tech,True
-AMZN,Amazon,0,0,0.10,Mega Cap Tech,True
-CRWD,CrowdStrike,0,0,0.05,Cybersecurity,True
-QQQ,Invesco QQQ ETF,0,0,0.10,ETF,True
-VOO,Vanguard S&P 500 ETF,0,0,0.10,ETF,True
-CASH,Cash,20000,1,0.10,Cash,True
+ticker,shares,avg_buy_price
+NVDA,0,0
+AMD,0,0
+PLTR,0,0
+TSLA,0,0
+META,0,0
+AMZN,0,0
+CRWD,0,0

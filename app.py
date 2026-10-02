@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import date
 import numpy as np
 import pandas as pd
@@ -21,6 +22,52 @@ def hist(t):
 def rsi(s,n=14):
     x=s.diff(); u=x.clip(lower=0).rolling(n).mean(); d=(-x.clip(upper=0)).rolling(n).mean()
     return 100-100/(1+u/d.replace(0,np.nan))
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def company_profile(ticker):
+    try:
+        info = yf.Ticker(ticker).get_info() or {}
+        name = info.get("shortName") or info.get("longName") or ticker
+        summary = " ".join(str(info.get("longBusinessSummary") or "").split())
+        if summary:
+            brief = re.split(r"(?<=[.!?])\s+(?=[A-Z])", summary, maxsplit=1)[0]
+            if len(brief) > 220:
+                brief = brief[:217].rsplit(" ", 1)[0] + "…"
+        else:
+            brief = " · ".join(str(info[k]) for k in ("sector", "industry") if info.get(k))
+            brief = brief or "Company description unavailable"
+        return name, brief
+    except Exception:
+        return ticker, "Company description unavailable"
+
+MAX_SCORE = 11
+
+def recommendation(score, rv, vol, holding=False):
+    if score < 3:
+        return "REDUCE / REVIEW" if holding else "AVOID NEW ENTRY"
+    if rv > 78:
+        return "HOLD / WAIT FOR PULLBACK" if holding else "WAIT FOR PULLBACK"
+    if vol > 75:
+        return "HOLD / REVIEW POSITION SIZE" if holding else "WATCH / HIGH RISK"
+    if score >= 9:
+        return "HOLD / CONSIDER ADDING" if holding else "CONSIDER BUYING"
+    if score >= 7:
+        return "HOLD / CONSIDER SMALL ADD" if holding else "CONSIDER SMALL ENTRY"
+    if score >= 5:
+        return "HOLD / MONITOR" if holding else "WATCH / WAIT FOR CONFIRMATION"
+    return "HOLD / MONITOR" if holding else "WAIT / NO NEW ENTRY"
+
+def display_results(frame, holding=False):
+    frame = frame.copy()
+    # Recompute display fields for older cached daily scans too.
+    frame["score %"] = (frame["score"].clip(0, MAX_SCORE) / MAX_SCORE * 100).round(1)
+    frame["recommendation"] = frame.apply(
+        lambda row: recommendation(row["score"], row["RSI"], row["volatility %"], holding), axis=1)
+    profiles = {ticker: company_profile(ticker) for ticker in frame["ticker"].dropna().unique()}
+    frame["company"] = frame["ticker"].map(lambda ticker: profiles.get(ticker, (ticker, "Company description unavailable"))[0])
+    frame["company brief"] = frame["ticker"].map(lambda ticker: profiles.get(ticker, (ticker, "Company description unavailable"))[1])
+    first = ["ticker", "company", "company brief", "price", "score %", "recommendation", "reason"]
+    return frame[first + [col for col in frame.columns if col not in first]]
 
 def analyze(t):
     d=hist(t)
@@ -68,7 +115,9 @@ a,b,c=st.tabs(["🌎 Daily market scan","💼 Portfolio actions","✏️ Update 
 with a:
     rec=scan(n) if force else saved_scan(n)
     st.subheader("Today's discovered candidates")
-    st.dataframe(rec,use_container_width=True,hide_index=True)
+    st.dataframe(display_results(rec),use_container_width=True,hide_index=True,
+        column_config={"company brief": st.column_config.TextColumn("Company brief", width="large"), "score %": st.column_config.NumberColumn("Score (%)", format="%.1f%%")})
+    st.caption("Score = technical points / 11 × 100, floored at 0%. It is not a probability of profit. Recommendations also consider RSI and volatility.")
     st.info("The ticker list is discovered by the scan and can change daily. It does not change your holdings.")
 
 with c:
@@ -95,5 +144,7 @@ with b:
         if not d.empty:
             total=d["value"].sum()+cash; d["portfolio %"]=(d["value"]/total*100).round(2)
             st.metric("Portfolio + cash",f"${total:,.0f}")
-            st.dataframe(d,use_container_width=True,hide_index=True)
+            st.dataframe(display_results(d, holding=True),use_container_width=True,hide_index=True,
+                column_config={"company brief": st.column_config.TextColumn("Company brief", width="large"), "score %": st.column_config.NumberColumn("Score (%)", format="%.1f%%")})
+            st.caption("Score = technical points / 11 × 100, floored at 0%. It is not a probability of profit.")
             st.caption("Signals are model-generated trend/momentum/risk indicators. No trade is made automatically.")
