@@ -1,23 +1,14 @@
-# Investment Agent v4.3 Daily Auto Scan
+#Investment Agent v5.1
+Changes:
+- Mobile-friendly Top Picks cards
+- Company names and useful short company descriptions
+- Compact full ranking table for iPhone
+- Expandable technical details
+- Daily dynamic market scan preserved
+- Manual portfolio workflow preserved
 
-## Main behavior
-- The recommended ticker list scans automatically once per calendar day when the app is opened.
-- You can force a scan from the sidebar.
-- The actual portfolio is manual only.
-- Portfolio view shows:
-  - current value
-  - gain/loss per stock
-  - gain/loss %
-  - actual weight %
-  - target weight %
-  - rebalance amount
-  - RSI, momentum, volume ratio and signal reason
+Deployment:
+Replace app.py in the GitHub repository with this version.
+Keep requirements.txt.
+Do not overwrite your live portfolio.csv if it already contains your real holdings.
 
-## Streamlit Cloud
-Upload/replace in the root of the GitHub repo:
-- app.py
-- requirements.txt
-- runtime.txt
-- portfolio.csv
-
-Then reboot the app.
