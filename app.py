@@ -89,7 +89,7 @@ def analyze(t):
     if vol>75: score-=1; why.append("high volatility")
     sig="STRONG CANDIDATE" if score>=9 else "BUY CANDIDATE" if score>=7 else "WATCH" if score>=5 else "HOLD / NEUTRAL" if score>=3 else "REDUCE / REVIEW"
     name, brief = company_profile(t)
-    return {"ticker":t,"company":name,"Company brief":brief,"price":round(p,2),"score":score,"signal":sig,"1M %":round(m1,1),"3M %":round(m3,1),"6M %":round(m6,1),"RSI":round(rv,1),"volatility %":round(vol,1),"reason":", ".join(why)}
+    return {"ticker":t,"company":name,"Company brief":brief,"price":round(p,2),"score":score,"Score %":round(score/11*100),"signal":sig,"1M %":round(m1,1),"3M %":round(m3,1),"6M %":round(m6,1),"RSI":round(rv,1),"volatility %":round(vol,1),"reason":", ".join(why)}
 
 def scan(n):
     rows=[]; b=st.progress(0,text="Scanning broad U.S. market universe...")
@@ -136,11 +136,11 @@ with a:
         st.divider()
 
     st.subheader("📋 Full ranked list")
-    mobile_cols=["ticker","company","score","signal","price","1M %","3M %"]
+    mobile_cols=["ticker","company","score","Score %","signal","price","1M %","3M %"]
     st.dataframe(rec[mobile_cols],use_container_width=True,hide_index=True)
 
     with st.expander("Company descriptions & technical details"):
-        detail_cols=["ticker","company","Company brief","6M %","RSI","volatility %","reason"]
+        detail_cols=["ticker","company","score","Score %","Company brief","6M %","RSI","volatility %","reason"]
         st.dataframe(rec[detail_cols],use_container_width=True,hide_index=True)
 
     st.info("The recommendation list is discovered by the daily scan and can change each day. It never changes your actual holdings automatically.")
