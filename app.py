@@ -4,9 +4,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+from supabase import create_client
 
 st.set_page_config(page_title="Market & Portfolio Agent", page_icon="📈", layout="wide")
-PF="portfolio.csv"; SCAN="market_scan.csv"; META="market_scan_date.txt"
+SCAN="market_scan.csv"; META="market_scan_date.txt"
 
 PROFILES = {
 "MPC":("Marathon Petroleum","U.S. refining, fuel marketing and midstream energy company."),
@@ -108,13 +109,97 @@ def saved_scan(n):
     except:pass
     return scan(n)
 
+def get_supabase():
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_ANON_KEY"]
+        return create_client(url, key)
+    except Exception:
+        return None
+
+def login_gate():
+    if "sb" not in st.session_state:
+        st.session_state.sb = get_supabase()
+    sb = st.session_state.sb
+    if sb is None:
+        st.error("Supabase is not configured yet. Add SUPABASE_URL and SUPABASE_ANON_KEY to Streamlit Secrets.")
+        st.stop()
+
+    if st.session_state.get("user_id"):
+        return sb
+
+    st.title("🔐 Investment Agent Login")
+    st.caption("Each account has its own private portfolio.")
+    mode = st.radio("Account", ["Sign in", "Create account"], horizontal=True)
+    email = st.text_input("Email")
+    password = st.text_input("Password", type="password")
+
+    if mode == "Sign in":
+        if st.button("Sign in", type="primary"):
+            try:
+                res = sb.auth.sign_in_with_password({"email": email.strip(), "password": password})
+                st.session_state.user_id = res.user.id
+                st.session_state.user_email = res.user.email
+                st.rerun()
+            except Exception as e:
+                st.error("Sign in failed. Check the email/password and that the account is confirmed.")
+    else:
+        if st.button("Create account", type="primary"):
+            try:
+                res = sb.auth.sign_up({"email": email.strip(), "password": password})
+                if res.user:
+                    st.success("Account created. If email confirmation is enabled in Supabase, confirm the email and then sign in.")
+            except Exception as e:
+                st.error("Could not create the account. The email may already exist or the password may be too short.")
+    st.stop()
+
 def load_pf():
-    try:return pd.read_csv(PF)
-    except:return pd.DataFrame(columns=["ticker","shares","avg_buy_price"])
+    sb = st.session_state.sb
+    uid = st.session_state.user_id
+    try:
+        res = sb.table("portfolios").select("ticker,shares,avg_buy_price").eq("user_id", uid).order("ticker").execute()
+        rows = res.data or []
+        return pd.DataFrame(rows, columns=["ticker","shares","avg_buy_price"])
+    except Exception as e:
+        st.error("Could not load your private portfolio.")
+        return pd.DataFrame(columns=["ticker","shares","avg_buy_price"])
+
+def save_pf(df):
+    sb = st.session_state.sb
+    uid = st.session_state.user_id
+    clean = df.copy()
+    if "ticker" not in clean.columns:
+        clean["ticker"] = ""
+    if "shares" not in clean.columns:
+        clean["shares"] = 0.0
+    if "avg_buy_price" not in clean.columns:
+        clean["avg_buy_price"] = 0.0
+    clean["ticker"] = clean["ticker"].astype(str).str.upper().str.strip()
+    clean = clean[clean["ticker"].ne("") & clean["ticker"].ne("NAN")].copy()
+    clean["shares"] = pd.to_numeric(clean["shares"], errors="coerce").fillna(0.0)
+    clean["avg_buy_price"] = pd.to_numeric(clean["avg_buy_price"], errors="coerce").fillna(0.0)
+    records = [
+        {"user_id": uid, "ticker": r["ticker"], "shares": float(r["shares"]), "avg_buy_price": float(r["avg_buy_price"])}
+        for _, r in clean.iterrows()
+    ]
+    # RLS ensures a signed-in user can only delete/write their own rows.
+    sb.table("portfolios").delete().eq("user_id", uid).execute()
+    if records:
+        sb.table("portfolios").insert(records).execute()
+    return clean
+
+login_gate()
 
 st.title("📈 Market & Portfolio Agent")
 st.caption("Daily broad-market discovery. Your actual portfolio remains under manual control.")
 with st.sidebar:
+    st.caption(f"Signed in: {st.session_state.get('user_email','')}")
+    if st.button("Sign out"):
+        try: st.session_state.sb.auth.sign_out()
+        except Exception: pass
+        for k in ["user_id","user_email","sb"]:
+            st.session_state.pop(k, None)
+        st.rerun()
     n=st.slider("Daily recommendations",5,25,15)
     force=st.button("Run market scan now")
     cash=st.number_input("Cash / uninvested amount",0.0,value=20000.0,step=1000.0)
@@ -129,7 +214,7 @@ with a:
     for _, r in top.iterrows():
         st.markdown(
             f"### {r['ticker']} — {r.get('company', r['ticker'])}\n"
-            f"**{r['signal']} · Score {int(r['score'])}/11 · ${float(r['price']):,.2f}**  \n"
+            f"**{r['signal']} · Score {int(r['score'])}/11 · Score {int(r['Score %'])}% · ${float(r['price']):,.2f}**  \n"
             f"1M {float(r['1M %']):+.1f}% · 3M {float(r['3M %']):+.1f}% · RSI {float(r['RSI']):.1f}  \n"
             f"{r.get('Company brief','')}"
         )
@@ -148,9 +233,13 @@ with a:
 with c:
     pf=load_pf()
     edit=st.data_editor(pf,num_rows="dynamic",use_container_width=True)
-    if st.button("Save actual portfolio"):
-        edit["ticker"]=edit.ticker.astype(str).str.upper().str.strip()
-        edit.to_csv(PF,index=False); st.success("Portfolio saved.")
+    if st.button("Save actual portfolio", type="primary"):
+        try:
+            saved = save_pf(edit)
+            st.success(f"Portfolio saved privately. {len(saved)} holding(s) stored for your account.")
+            st.session_state["portfolio_saved_at"] = str(pd.Timestamp.now())
+        except Exception as e:
+            st.error("Portfolio could not be saved. Check the Supabase table/policies and try again.")
 
 with b:
     pf=load_pf()
