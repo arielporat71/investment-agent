@@ -3,6 +3,7 @@ from datetime import date
 import numpy as np
 import pandas as pd
 import streamlit as st
+import io
 import yfinance as yf
 from supabase import create_client
 
@@ -130,27 +131,50 @@ def login_gate():
 
     st.title("🔐 Investment Agent Login")
     st.caption("Each account has its own private portfolio.")
-    mode = st.radio("Account", ["Sign in", "Create account"], horizontal=True)
-    email = st.text_input("Email")
-    password = st.text_input("Password", type="password")
-
-    if mode == "Sign in":
-        if st.button("Sign in", type="primary"):
+    mode = st.radio("Account", ["Sign in", "Create account", "Reset password"], horizontal=True)
+    email = st.text_input("Email", key="auth_email").strip().lower()
+    password = st.text_input("Password (at least 8 characters)", type="password", key="auth_password") if mode != "Reset password" else ""
+    if mode == "Sign in" and st.button("Sign in", type="primary"):
+        try:
+            res = sb.auth.sign_in_with_password({"email": email, "password": password})
+            if not res.user or not res.session:
+                raise ValueError("No authenticated session was returned")
+            st.session_state.user_id = res.user.id
+            st.session_state.user_email = res.user.email
+            st.rerun()
+        except Exception:
+            st.error("Sign in failed. Verify your password and email confirmation. If you already registered, do not create the same account again.")
+    elif mode == "Create account" and st.button("Create account", type="primary"):
+        if "@" not in email or "." not in email.split("@")[-1]:
+            st.error("Enter a valid email address.")
+        elif len(password) < 8:
+            st.error("Use a password with at least 8 characters.")
+        else:
             try:
-                res = sb.auth.sign_in_with_password({"email": email.strip(), "password": password})
-                st.session_state.user_id = res.user.id
-                st.session_state.user_email = res.user.email
-                st.rerun()
+                res = sb.auth.sign_up({"email": email, "password": password})
+                if res.session and res.user:
+                    st.session_state.user_id = res.user.id
+                    st.session_state.user_email = res.user.email
+                    st.success("Account created and signed in.")
+                    st.rerun()
+                else:
+                    st.info("Registration request received. If email confirmation is enabled, open the confirmation email, then select Sign in. If this email already exists, use Sign in or Reset password instead.")
             except Exception as e:
-                st.error("Sign in failed. Check the email/password and that the account is confirmed.")
-    else:
-        if st.button("Create account", type="primary"):
+                msg = str(e).lower()
+                if "rate limit" in msg or "email" in msg and "limit" in msg:
+                    st.error("Supabase email sending limit reached. The app cannot bypass this. Configure custom SMTP in Supabase, or wait for the limit to reset.")
+                else:
+                    st.error("Registration could not be completed. This email may already exist, or the authentication provider rejected the request. Try Sign in or Reset password.")
+    elif mode == "Reset password" and st.button("Send password reset email", type="primary"):
+        if "@" not in email:
+            st.error("Enter your email address.")
+        else:
             try:
-                res = sb.auth.sign_up({"email": email.strip(), "password": password})
-                if res.user:
-                    st.success("Account created. If email confirmation is enabled in Supabase, confirm the email and then sign in.")
+                sb.auth.reset_password_email(email)
+                st.info("If this address has an account and email sending is available, a reset email will arrive shortly.")
             except Exception as e:
-                st.error("Could not create the account. The email may already exist or the password may be too short.")
+                st.error("Could not send reset email. Supabase email limits or SMTP settings may need attention.")
+    st.caption("Account creation and email delivery are controlled by Supabase Auth. Never put a secret/service-role key in Streamlit Secrets.")
     st.stop()
 
 def load_pf():
@@ -231,15 +255,69 @@ with a:
     st.info("The recommendation list is discovered by the daily scan and can change each day. It never changes your actual holdings automatically.")
 
 with c:
+    st.subheader("Import or edit your private portfolio")
+    st.caption("Upload a CSV or Excel file with ticker, shares, avg_buy_price. Common alternate column names are supported. Only your signed-in account is updated.")
     pf=load_pf()
-    edit=st.data_editor(pf,num_rows="dynamic",use_container_width=True)
-    if st.button("Save actual portfolio", type="primary"):
+    uploaded = st.file_uploader("Import holdings (CSV / XLSX)", type=["csv","xlsx"], key="portfolio_import")
+    import_mode = st.radio("Import behavior", ["Replace my holdings", "Merge with my holdings"], horizontal=True)
+    if uploaded is not None:
         try:
-            saved = save_pf(edit)
-            st.success(f"Portfolio saved privately. {len(saved)} holding(s) stored for your account.")
-            st.session_state["portfolio_saved_at"] = str(pd.Timestamp.now())
+            raw = pd.read_excel(uploaded) if uploaded.name.lower().endswith(".xlsx") else pd.read_csv(uploaded, sep=None, engine="python", encoding="utf-8-sig")
+            aliases = {
+                "ticker": ["ticker", "symbol", "stock", "סימול", "מניה", "נייר"],
+                "shares": ["shares", "quantity", "qty", "units", "amount", "כמות", "יחידות"],
+                "avg_buy_price": ["avg_buy_price", "average price", "avg price", "average_cost", "cost basis", "purchase price", "מחיר קניה", "מחיר קנייה", "מחיר ממוצע"]
+            }
+            normalized = {str(col).strip().lower().replace("_", " "): col for col in raw.columns}
+            mapping = {}
+            for dest, opts in aliases.items():
+                for alias in opts:
+                    found = normalized.get(alias.lower().replace("_", " "))
+                    if found is not None:
+                        mapping[dest] = found
+                        break
+            if len(mapping) < 3:
+                st.warning("Choose the columns in your file:")
+                for dest in aliases:
+                    mapping[dest] = st.selectbox(dest, list(raw.columns), index=list(raw.columns).index(mapping[dest]) if dest in mapping else 0, key="map_"+dest)
+            imported = raw[[mapping[x] for x in ["ticker","shares","avg_buy_price"]]].copy()
+            imported.columns = ["ticker","shares","avg_buy_price"]
+            imported["ticker"] = imported["ticker"].astype(str).str.upper().str.strip()
+            for num in ["shares","avg_buy_price"]:
+                imported[num] = pd.to_numeric(imported[num], errors="coerce")
+            imported = imported.dropna(subset=["shares","avg_buy_price"])
+            imported = imported[imported.ticker.str.fullmatch(r"[A-Z0-9.\-^]{1,20}", na=False)]
+            imported = imported[(imported.shares > 0) & (imported.avg_buy_price >= 0)]
+            if imported.ticker.duplicated().any():
+                st.error("The imported file has duplicate ticker symbols. Combine them before importing.")
+            elif imported.empty:
+                st.error("No valid holdings found. Check ticker, shares, and average buy price.")
+            else:
+                if import_mode == "Merge with my holdings":
+                    preview = pd.concat([pf[~pf.ticker.isin(imported.ticker)], imported], ignore_index=True)
+                else:
+                    preview = imported
+                st.caption(f"Preview: {len(preview)} holdings; no changes saved yet")
+                st.dataframe(preview, use_container_width=True, hide_index=True)
+                if st.button("Confirm import and save to my account", type="primary"):
+                    try:
+                        save_pf(preview)
+                        st.success("Portfolio imported and saved to your private account.")
+                        st.rerun()
+                    except Exception:
+                        st.error("Import failed; check Supabase access and try again.")
         except Exception as e:
-            st.error("Portfolio could not be saved. Check the Supabase table/policies and try again.")
+            st.error("Unable to read this file. Use CSV or XLSX with a header row.")
+    with st.expander("Manual portfolio editor"):
+        edit=st.data_editor(pf,num_rows="dynamic",use_container_width=True)
+        if st.button("Save actual portfolio", type="primary"):
+            try:
+                saved = save_pf(edit)
+                st.success(f"Portfolio saved privately. {len(saved)} holding(s) stored for your account.")
+            except Exception:
+                st.error("Portfolio could not be saved. Check the Supabase table/policies and try again.")
+    if not pf.empty:
+        st.download_button("Download my portfolio as CSV", pf.to_csv(index=False).encode("utf-8-sig"), "my_portfolio.csv", "text/csv")
 
 with b:
     pf=load_pf()
